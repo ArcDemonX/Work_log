@@ -241,5 +241,148 @@
     return zip(workbookParts(sheets));
   }
 
-  return { write, zip, crc32, colName, safeSheetName, dateSerial, timeSerial, escXml, STYLES, MIME: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+  // ---------- Reading (.xlsx import) ----------
+
+  /**
+   * Inflate raw DEFLATE data. Files re-saved by Excel / Google Sheets are compressed (method 8).
+   * DecompressionStream is built into modern browsers (Chrome 80+, Safari 16.4+, Firefox 113+) and Node 18+.
+   */
+  async function inflateRaw(data) {
+    if (typeof DecompressionStream === 'undefined') {
+      const e = new Error('no-deflate');
+      e.code = 'unsupported';
+      throw e;
+    }
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  /** Read a ZIP archive. Returns { name: Uint8Array }. Uses the central directory (sizes there are always correct). */
+  async function unzip(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let eocd = -1;
+    // The end record is the last 22 bytes, unless the archive has a trailing comment (up to 64 KB).
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i--) {
+      if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw Object.assign(new Error('not a zip'), { code: 'format' });
+    const count = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    const dec = new TextDecoder();
+    const out = {};
+    for (let i = 0; i < count; i++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) throw Object.assign(new Error('bad zip'), { code: 'format' });
+      const method = dv.getUint16(p + 10, true);
+      const compSize = dv.getUint32(p + 20, true);
+      const nameLen = dv.getUint16(p + 28, true);
+      const extraLen = dv.getUint16(p + 30, true);
+      const commentLen = dv.getUint16(p + 32, true);
+      const off = dv.getUint32(p + 42, true);
+      const name = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+      const localStart = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true);
+      const raw = bytes.subarray(localStart, localStart + compSize);
+      if (method === 0) out[name] = raw;
+      else if (method === 8) out[name] = await inflateRaw(raw);
+      // other methods are not used by spreadsheet apps; skip
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  function unescXml(s) {
+    return s
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(Number(d)))
+      .replace(/&amp;/g, '&');
+  }
+
+  /** All <t> text inside a fragment, concatenated (handles rich-text runs). */
+  function textOf(fragment) {
+    let s = '';
+    const re = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+    let m;
+    while ((m = re.exec(fragment))) s += m[1];
+    return unescXml(s);
+  }
+
+  /** "AB12" -> column index 27 */
+  function colIndex(ref) {
+    const letters = /^[A-Z]+/.exec(ref)[0];
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+
+  /**
+   * Read the FIRST worksheet of an .xlsx file into a 2D array of plain values
+   * (numbers stay numbers, everything else becomes a string). Regex-based on purpose:
+   * the XML subset we need is tiny, and this works the same in browsers and Node.
+   */
+  async function readFirstSheet(bytes) {
+    const files = await unzip(bytes);
+    const dec = new TextDecoder();
+    const str = (name) => (files[name] ? dec.decode(files[name]) : null);
+    const wb = str('xl/workbook.xml');
+    if (!wb) throw Object.assign(new Error('not xlsx'), { code: 'format' });
+
+    // Resolve the first sheet's file through the workbook relationships.
+    let sheetPath = 'xl/worksheets/sheet1.xml';
+    const first = /<sheet\b[^>]*\br:id="([^"]+)"/.exec(wb);
+    const rels = str('xl/_rels/workbook.xml.rels');
+    if (first && rels) {
+      const relRe = /<Relationship\b[^>]*>/g;
+      let m;
+      while ((m = relRe.exec(rels))) {
+        if (m[0].includes('Id="' + first[1] + '"')) {
+          const target = /Target="([^"]+)"/.exec(m[0])[1];
+          sheetPath = target.startsWith('/') ? target.slice(1) : 'xl/' + target.replace(/^\.\//, '');
+        }
+      }
+    }
+    const sheet = str(sheetPath);
+    if (!sheet) throw Object.assign(new Error('no sheet'), { code: 'format' });
+
+    const shared = [];
+    const sst = str('xl/sharedStrings.xml');
+    if (sst) {
+      const siRe = /<si>([\s\S]*?)<\/si>/g;
+      let m;
+      while ((m = siRe.exec(sst))) shared.push(textOf(m[1]));
+    }
+
+    const rows = [];
+    const rowRe = /<row\b([^>]*)>([\s\S]*?)<\/row>/g;
+    let rm;
+    let rowIdx = 0;
+    while ((rm = rowRe.exec(sheet))) {
+      const rAttr = /\br="(\d+)"/.exec(rm[1]);
+      rowIdx = rAttr ? Number(rAttr[1]) - 1 : rowIdx;
+      const row = [];
+      const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+      let cm;
+      let colIdx = 0;
+      while ((cm = cellRe.exec(rm[2]))) {
+        const attrs = cm[1];
+        const ref = /\br="([A-Z]+\d+)"/.exec(attrs);
+        colIdx = ref ? colIndex(ref[1]) : colIdx;
+        const type = (/\bt="(\w+)"/.exec(attrs) || [])[1];
+        const body = cm[2] || '';
+        const v = /<v>([\s\S]*?)<\/v>/.exec(body);
+        let val = null;
+        if (type === 's' && v) val = shared[Number(v[1])] != null ? shared[Number(v[1])] : null;
+        else if (type === 'inlineStr') val = textOf(body);
+        else if (type === 'str' || type === 'e') val = v ? unescXml(v[1]) : null;
+        else if (type === 'b') val = v ? v[1] === '1' : null;
+        else if (v) val = Number(v[1]);
+        row[colIdx] = val;
+        colIdx++;
+      }
+      rows[rowIdx] = row;
+      rowIdx++;
+    }
+    return rows.map((r) => r || []);
+  }
+
+  return { write, zip, unzip, readFirstSheet, crc32, colName, safeSheetName, dateSerial, timeSerial, escXml, STYLES, MIME: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
 });

@@ -92,5 +92,116 @@
     return xlsx.write(buildSheets(opts));
   }
 
-  return { buildSheets, buildWorkbook };
+  // ---------- Import from a spreadsheet ----------
+
+  // Header names recognised per field (compared lower-case, with any "(...)" suffix removed).
+  // Includes the app's own export headers in both languages, so an exported file imports back as-is.
+  const HEADER_ALIASES = {
+    date: ['תאריך', 'date', 'day date'],
+    start: ['כניסה', 'שעת כניסה', 'התחלה', 'in', 'start', 'clock in', 'start time', 'time in'],
+    end: ['יציאה', 'שעת יציאה', 'סיום', 'out', 'end', 'clock out', 'end time', 'time out'],
+    breakMin: ['הפסקה', 'break', 'break min', 'break minutes'],
+    rate: ['שכר לשעה', 'תעריף', 'rate', 'hourly rate'],
+    bonus: ['תוספות', 'תוספת', 'טיפים', 'bonus', 'tips'],
+    note: ['הערה', 'הערות', 'note', 'notes', 'comment'],
+  };
+  // Column positions of the app's own export, used if no header row is found.
+  const DEFAULT_COLUMNS = { date: 0, start: 2, end: 3, breakMin: 4, rate: 6, bonus: 8, note: 10 };
+
+  const normHeader = (v) => String(v == null ? '' : v).replace(/\(.*?\)/g, '').replace(/[׳']/g, '').trim().toLowerCase();
+
+  function findHeader(rows) {
+    for (let r = 0; r < Math.min(rows.length, 10); r++) {
+      const map = {};
+      (rows[r] || []).forEach((cell, c) => {
+        const h = normHeader(cell);
+        if (!h) return;
+        for (const [field, names] of Object.entries(HEADER_ALIASES)) {
+          if (map[field] == null && names.includes(h)) map[field] = c;
+        }
+      });
+      if (map.date != null && map.start != null && map.end != null) return { row: r, map };
+    }
+    return null;
+  }
+
+  /** Excel date serial or "dd/mm/yyyy" / "dd.mm.yyyy" / "yyyy-mm-dd" -> {y, m, d} (m is 0-11). */
+  function readDate(v) {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      const d = new Date(Math.round((Math.floor(v) - 25569) * 86400000));
+      return { y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate() };
+    }
+    if (typeof v !== 'string') return null;
+    const s = v.trim();
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+    if (m) return { y: +m[1], m: +m[2] - 1, d: +m[3] };
+    m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/.exec(s);
+    if (m) return { y: m[3].length === 2 ? 2000 + +m[3] : +m[3], m: +m[2] - 1, d: +m[1] };
+    return null;
+  }
+
+  /** Excel time fraction (or full date-time serial) or "HH:MM[:SS]" -> minutes after midnight. */
+  function readTime(v) {
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      const frac = v - Math.floor(v);
+      return Math.round(frac * 1440) % 1440;
+    }
+    if (typeof v !== 'string') return null;
+    const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(v.trim());
+    if (!m || +m[1] > 23 || +m[2] > 59) return null;
+    return +m[1] * 60 + +m[2];
+  }
+
+  function readNumber(v) {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim()) {
+      const n = parseFloat(v.replace(/[^\d.,-]/g, '').replace(',', '.'));
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  /**
+   * Turn spreadsheet rows into shifts.
+   * Rows without a readable date (titles, header, totals row) are ignored.
+   * Rows WITH a date but unreadable times are counted in `skipped` so the user is told.
+   * Returns { shifts, skipped }. Shifts have no id yet; the caller assigns them.
+   */
+  function parseShiftRows(rows, settings) {
+    const header = findHeader(rows);
+    const col = header ? Object.assign({}, header.map) : DEFAULT_COLUMNS;
+    const firstRow = header ? header.row + 1 : 0;
+    const shifts = [];
+    let skipped = 0;
+    for (let r = firstRow; r < rows.length; r++) {
+      const row = rows[r] || [];
+      const date = readDate(row[col.date]);
+      if (!date) continue;
+      const startMin = readTime(row[col.start]);
+      const endMin = readTime(row[col.end]);
+      if (startMin == null || endMin == null) { skipped++; continue; }
+      const start = new Date(date.y, date.m, date.d, Math.floor(startMin / 60), startMin % 60).getTime();
+      const endDate = new Date(date.y, date.m, date.d, Math.floor(endMin / 60), endMin % 60);
+      if (endDate.getTime() <= start) endDate.setDate(endDate.getDate() + 1); // overnight shift
+      const rate = col.rate != null ? readNumber(row[col.rate]) : null;
+      const breakMin = col.breakMin != null ? readNumber(row[col.breakMin]) : null;
+      const bonus = col.bonus != null ? readNumber(row[col.bonus]) : null;
+      const note = col.note != null && row[col.note] != null ? String(row[col.note]) : '';
+      shifts.push({
+        start,
+        end: endDate.getTime(),
+        breakMin: Math.max(0, Math.round(breakMin || 0)),
+        rate: rate != null && rate >= 0 ? rate : Number(settings.hourlyRate) || 0,
+        bonus: bonus || 0,
+        note: note.slice(0, 500),
+      });
+    }
+    return { shifts, skipped, matchedHeader: Boolean(header) };
+  }
+
+  async function importWorkbook(bytes, settings) {
+    return parseShiftRows(await xlsx.readFirstSheet(bytes), settings);
+  }
+
+  return { buildSheets, buildWorkbook, parseShiftRows, importWorkbook };
 });

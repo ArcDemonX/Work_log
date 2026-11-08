@@ -5,8 +5,7 @@
 (function () {
   'use strict';
 
-  const APP_VERSION = '1.0.0';
-  const BACKUP_REMIND_DAYS = 7;
+  const APP_VERSION = '1.1.0';
   const { calc, store, report, xlsx, i18n } = window.WL;
 
   // localStorage can throw on access in some privacy modes; fall back to an in-memory shim.
@@ -216,14 +215,6 @@
     if (!state.settings.hourlyRate) {
       html += '<div class="banner"><span>' + esc(t('setRateBanner')) + '</span><button type="button" class="btn" data-act="settings">' + esc(t('setRateAction')) + '</button></div>';
     }
-    if (state.shifts.length) {
-      const last = state.meta.lastBackupAt;
-      const days = last ? Math.floor((Date.now() - last) / 86400000) : null;
-      if (last == null || days >= BACKUP_REMIND_DAYS) {
-        const msg = last == null ? t('backupNever') : t('backupOld', { days });
-        html += '<div class="banner"><span>' + esc(msg) + '</span><button type="button" class="btn" data-act="backup">' + esc(t('backupNow')) + '</button></div>';
-      }
-    }
     return html;
   }
 
@@ -248,14 +239,16 @@
     html +=
       '<div class="row-actions">' +
       '<button type="button" class="btn btn-secondary" data-act="add">＋ ' + esc(t('addManual')) + '</button>' +
-      '<button type="button" class="btn btn-secondary" data-act="export">⤓ ' + esc(t('exportExcel')) + '</button>' +
+      '<button type="button" class="btn btn-secondary" data-act="export">⇅ ' + esc(t('importExport')) + '</button>' +
       '</div>';
 
     const list = calc.shiftsInMonth(state.shifts, ui.month).sort((a, b) => b.start - a.start);
     if (!list.length) {
       html +=
         '<div class="empty"><svg viewBox="0 0 24 24" width="56" height="56" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>' +
-        '<h2>' + esc(t('noShifts')) + '</h2><div>' + esc(t('noShiftsHint')) + '</div></div>';
+        '<h2>' + esc(t('noShifts')) + '</h2><div>' + esc(t('noShiftsHint')) + '</div>' +
+        (state.shifts.length ? '' : '<button type="button" class="btn btn-ghost" data-act="import" style="margin-top:12px">⤒ ' + esc(t('importFile')) + '</button>') +
+        '</div>';
     } else {
       let currentDay = null;
       for (const s of list) {
@@ -510,13 +503,18 @@
   function openExport() {
     const year = calc.parseMonthKey(ui.month).year;
     const html =
-      '<div class="sheet-head"><h2>' + esc(t('exportTitle')) + '</h2>' +
+      '<div class="sheet-head"><h2>' + esc(t('importExport')) + '</h2>' +
       '<button type="button" class="icon-btn" data-close aria-label="' + esc(t('close')) + '">✕</button></div>' +
-      '<div class="stack">' +
+      '<div class="settings-section" style="border-top:0;padding-top:0"><h3>' + esc(t('exportTitle')) + '</h3><div class="stack">' +
       '<button type="button" class="btn btn-primary btn-block" data-range="month">' + esc(t('exportMonth', { month: fmtMonth(ui.month) })) + '</button>' +
       '<button type="button" class="btn btn-secondary btn-block" data-range="year">' + esc(t('exportYear', { year })) + '</button>' +
       '<button type="button" class="btn btn-secondary btn-block" data-range="all">' + esc(t('exportAll')) + '</button>' +
-      '</div>';
+      '</div></div>' +
+      '<div class="settings-section"><h3>' + esc(t('importTitle')) + '</h3>' +
+      '<p class="muted" style="margin:0 0 10px;font-size:.88rem">' + esc(t('importHint')) + '</p>' +
+      '<button type="button" class="btn btn-primary btn-block" data-act="import">⤒ ' + esc(t('importFile')) + '</button></div>' +
+      '<div class="settings-section"><h3>' + esc(t('data')) + '</h3>' +
+      '<button type="button" class="btn btn-secondary btn-block" data-act="backup">' + esc(t('exportBackup')) + '</button></div>';
     openSheet(html, (dlg) => {
       dlg.querySelector('[data-close]').onclick = closeSheet;
       dlg.querySelectorAll('[data-range]').forEach((b) => {
@@ -549,10 +547,52 @@
     return ok;
   }
 
-  async function importBackupFile(file) {
+  /** One entry point for every import: .xlsx files start with the ZIP signature "PK", anything else is read as a JSON backup. */
+  async function importFile(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b) return importExcelFile(bytes);
+    return importBackupText(new TextDecoder().decode(bytes));
+  }
+
+  /**
+   * Excel import always ADDS shifts (never deletes). A row with the same start and end as an
+   * existing shift is treated as a duplicate and skipped, so importing the same file twice is safe.
+   */
+  async function importExcelFile(bytes) {
+    let res;
+    try {
+      res = await report.importWorkbook(bytes, state.settings);
+    } catch (e) {
+      return toast(t(e.code === 'unsupported' ? 'errExcelBrowser' : 'errExcel'));
+    }
+    if (!res.shifts.length) return toast(t('importNoRows'));
+    const existing = new Set(state.shifts.map((s) => s.start + '|' + s.end));
+    const fresh = res.shifts.filter((s) => !existing.has(s.start + '|' + s.end));
+    const dup = res.shifts.length - fresh.length;
+    store.savePreImport(LS, state);
+    const now = Date.now();
+    for (const s of fresh) state.shifts.push(Object.assign(s, { id: store.uid(), createdAt: now, updatedAt: now }));
+    state.shifts.sort((a, b) => a.start - b.start);
+    if (fresh.length) ui.month = calc.monthKey(fresh[fresh.length - 1].start);
+    persist();
+    closeSheet();
+    ui.startupNotice = null;
+    render();
+    let msg = t('importedExcel', { n: fresh.length });
+    if (dup) msg += ' · ' + t('importDup', { n: dup });
+    if (res.skipped) msg += ' · ' + t('importSkipped', { n: res.skipped });
+    toast(msg, fresh.length ? { label: t('importUndo'), run: undoImport } : null);
+  }
+
+  function undoImport() {
+    const prev = store.loadPreImport(LS);
+    if (prev) { state = prev; persist(); render(); toast(t('importUndone')); }
+  }
+
+  async function importBackupText(text) {
     let parsed;
     try {
-      parsed = store.parseBackup(await file.text(), state.settings.lang);
+      parsed = store.parseBackup(text, state.settings.lang);
     } catch (e) {
       const key = e.code === 'newer' ? 'errNewer' : e.code === 'json' ? 'errJson' : 'errFormat';
       return toast(t(key));
@@ -581,13 +621,7 @@
     closeSheet();
     ui.startupNotice = null;
     render();
-    toast(msg, {
-      label: t('importUndo'),
-      run: () => {
-        const prev = store.loadPreImport(LS);
-        if (prev) { state = prev; persist(); render(); toast(t('importUndone')); }
-      },
-    });
+    toast(msg, { label: t('importUndo'), run: undoImport });
   }
 
   async function deleteAll() {
@@ -653,7 +687,7 @@
       '<p class="hint muted" style="margin:0 0 10px;font-size:.88rem">' + esc(t('dataHint')) + '</p>' +
       '<div class="stack">' +
       '<button type="button" class="btn btn-primary btn-block" id="do-backup">' + esc(t('exportBackup')) + '</button>' +
-      '<button type="button" class="btn btn-secondary btn-block" id="do-import">' + esc(t('importBackup')) + '</button>' +
+      '<button type="button" class="btn btn-secondary btn-block" id="do-import">' + esc(t('importFile')) + '</button>' +
       '</div><div class="footer-note">' + esc(lastBackup) + '</div></div>' +
 
       '<div class="settings-section"><h3>' + esc(t('dangerZone')) + '</h3>' +
@@ -724,6 +758,7 @@
       case 'export': return openExport();
       case 'settings': return openSettings();
       case 'backup': return exportBackup();
+      case 'import': return $('#import-file').click();
       case 'prev':
       case 'next': {
         const d = el.dataset.act === 'prev' ? -1 : 1;
@@ -756,7 +791,7 @@
     $('#import-file').addEventListener('change', (e) => {
       const file = e.target.files && e.target.files[0];
       e.target.value = ''; // allow choosing the same file again later
-      if (file) importBackupFile(file);
+      if (file) importFile(file);
     });
     render();
   });

@@ -4,7 +4,7 @@
  * Bump CACHE when shipping changes so old files are dropped.
  * NOTE: user data is NOT here; it lives in localStorage and is never touched by this file.
  */
-const CACHE = 'work-log-v1.0.0';
+const CACHE = 'work-log-v1.1.0';
 const ASSETS = [
   './',
   'index.html',

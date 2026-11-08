@@ -16,7 +16,8 @@
 | 📊 **Totals bar** | A sticky bar always shows the selected month's hours, earnings and shift count. |
 | 🗓 **By month** | Navigate month by month. The Summary tab shows a yearly bar chart, effective hourly rate and all-time totals. |
 | 📗 **Excel export** | A real `.xlsx` file for the month, the year, or everything. It has a shifts sheet and a monthly summary sheet, real date/time cells, and right-to-left layout in Hebrew. |
-| 🛟 **Backup & restore** | One-file JSON backup of *everything*. Restore by **merging** or **replacing**, with an **Undo** button after every restore. |
+| 📥 **Excel import** | Import an `.xlsx` file: one exported from the app and edited, or your own sheet with *Date / In / Out* columns (Hebrew or English headers, any order). Rows are **added**, and duplicates are skipped, so re-importing the same file is safe. |
+| 🛟 **Backup & restore** | One-file JSON backup of *everything*. Restore by **merging** or **replacing**. Every import has an **Undo** button. |
 | 🌐 **Hebrew / English** | Full RTL/LTR support. Switch any time from the top bar. |
 | 🌙 **Dark mode** | Follows your phone, or set it manually. |
 | 📴 **Offline** | Installable PWA. No internet needed after the first load. |
@@ -31,14 +32,13 @@ Your data is stored **only on your device**, in the browser's storage for the ap
 
 Protections built into the app:
 
-- **Backup reminder.** A banner appears if you have never backed up, or if your last backup is more than 7 days old.
 - **Delete-all safety.** "Delete all data" downloads a backup file *first*.
-- **Undo restore.** Restoring snapshots your current data so you can undo it.
+- **Undo import.** Every import (backup or Excel) snapshots your current data so you can undo it.
 - **Corrupt data is preserved.** If stored data is ever unreadable, it's copied aside, never overwritten.
 - **Persistent storage.** The app asks the browser not to evict its storage (supported on Android/Chrome).
 - **Versioned backups.** Backup files carry a schema version, so future versions of the app can still read old backups.
 
-**Habit to keep:** Settings → *Save backup file* → save it to Google Drive / email / WhatsApp to yourself.
+**Good habit:** Import / Export → *Save backup file* → keep it in Google Drive / email / WhatsApp to yourself.
 
 ## Using it on your phone
 
@@ -48,17 +48,19 @@ Protections built into the app:
    - iPhone: Share button → *Add to Home Screen*
 3. Open it from the home-screen icon. It runs full-screen and works offline.
 
-## Hosting
+## Hosting (GitHub Pages)
 
-The app is plain static files (HTML/CSS/JS) with **no build step and no dependencies**, so any static host works.
+The app is plain static files (HTML/CSS/JS) with **no build step and no dependencies**.
 
-> This repository is **private**. GitHub Pages for private repos requires a paid GitHub plan (Pro/Team). On a free plan, use Netlify or Cloudflare Pages instead. Both are free and can deploy straight from a private repo.
+**One-time setup** (the repository must be **public**; Pages is free for public repos):
 
-| Option | How |
-|---|---|
-| **Netlify** (free) | *Add new site → Import from Git →* pick this repo. Build command: *(empty)*. Publish directory: `/`. |
-| **Cloudflare Pages** (free) | *Create → Pages → Connect to Git →* pick this repo. Framework: *None*. Build command: *(empty)*. Output: `/`. |
-| **GitHub Pages** (paid plan for private repos) | Settings → Pages → Source: *GitHub Actions*. Then run the **Deploy to GitHub Pages** workflow from the Actions tab. |
+1. *Settings → Pages → Build and deployment → Source:* **GitHub Actions**
+2. *Actions* tab → **Deploy to GitHub Pages** → *Run workflow* (after this, every push to `main` deploys automatically)
+3. The app is live at `https://<your-username>.github.io/Work_log/`
+
+> Making the repo public publishes the **code only**. Your shifts and salary never leave your phone. `.gitignore` also blocks backup and export files from being committed by accident.
+
+Alternatives: **Netlify** or **Cloudflare Pages** (free, no build command, publish directory `/`; `netlify.toml` is included).
 
 **Pick one address and stick with it.** See the data section above.
 
@@ -77,7 +79,7 @@ You can also open `index.html` directly. Everything works except offline caching
 npm test   # Node 18+, no npm install needed
 ```
 
-Unit tests cover the pay/overtime math, overnight shifts, backup validation/merge/round-trip, corrupted-storage recovery, and the Excel writer (ZIP structure + CRC checks). CI runs them on every push.
+Unit tests cover the pay/overtime math, overnight shifts, backup validation/merge/round-trip, corrupted-storage recovery, the Excel writer (ZIP structure + CRC checks), and Excel import (round-trip, files re-saved by other spreadsheet programs, custom column layouts). CI runs them on every push.
 
 ## Project structure
 
@@ -86,13 +88,13 @@ index.html              App shell
 css/styles.css          Mobile-first styles; logical CSS properties so RTL/LTR share one stylesheet
 js/calc.js              Pure math: hours, overtime, pay, month grouping, overlaps
 js/storage.js           Data model, validation, migration, load/save, backup parse/merge
-js/report.js            Shifts → spreadsheet sheets
-js/xlsx.js              Tiny dependency-free .xlsx writer (OOXML + ZIP)
+js/report.js            Shifts ⇄ spreadsheet rows (export and import)
+js/xlsx.js              Tiny dependency-free .xlsx writer and reader (OOXML + ZIP)
 js/i18n.js              Hebrew / English strings
 js/app.js               UI: rendering, dialogs, events
 sw.js                   Service worker (offline cache)
 manifest.webmanifest    PWA install metadata
-tests/                  node:test unit tests
+tests/                  node:test unit tests (+ fixtures/ sample .xlsx files)
 ```
 
 ### Design decisions
@@ -140,7 +142,8 @@ When releasing a change, bump `APP_VERSION` in `js/app.js` and `CACHE` in `sw.js
 - **בר סיכום קבוע** בראש המסך: שעות, הכנסה ומספר משמרות של החודש.
 - **חלוקה לחודשים**, ומסך סיכום שנתי עם גרף לפי חודשים.
 - **ייצוא לאקסל** (קובץ ‎.xlsx אמיתי, מימין לשמאל) של חודש, שנה או הכול.
-- **גיבוי ושחזור** של כל המידע בקובץ אחד: מיזוג או החלפה, עם אפשרות לבטל את השחזור.
+- **ייבוא מאקסל**: קובץ שיוצא מהאפליקציה ונערך, או גיליון שלכם עם עמודות תאריך / כניסה / יציאה. משמרות מתווספות, וכפילויות מדולגות.
+- **גיבוי ושחזור** של כל המידע בקובץ אחד: מיזוג או החלפה, עם אפשרות לבטל כל ייבוא.
 - עברית ואנגלית, מצב כהה, ועבודה בלי אינטרנט.
 
 ### ⚠️ חשוב: איפה המידע נשמר
@@ -151,7 +154,7 @@ When releasing a change, bump `APP_VERSION` in `js/app.js` and `CACHE` in `sw.js
 - מחיקת נתוני הדפדפן או החלפת טלפון: אותו דבר.
 - באייפון, **התקנה למסך הבית** מונעת מספארי למחוק את המידע אחרי תקופה בלי שימוש.
 
-**הרגל מומלץ:** הגדרות ← *שמירת קובץ גיבוי* ← לשמור בדרייב, במייל או בוואטסאפ לעצמכם. האפליקציה תזכיר אם עברו יותר מ-7 ימים.
+**הרגל מומלץ:** ייבוא / ייצוא ← *שמירת קובץ גיבוי* ← לשמור בדרייב, במייל או בוואטסאפ לעצמכם.
 
 ### התקנה בטלפון
 
@@ -161,6 +164,11 @@ When releasing a change, bump `APP_VERSION` in `js/app.js` and `CACHE` in `sw.js
 
 ### אחסון (Hosting)
 
-ה-repository **פרטי**. GitHub Pages לריפו פרטי דורש מנוי בתשלום, ולכן הכי פשוט להשתמש ב-**Netlify** או ב-**Cloudflare Pages**: שניהם חינמיים ומתחברים ישירות לריפו פרטי, בלי פקודת build. פרטים מלאים בחלק האנגלי למעלה.
+האפליקציה מתארחת ב-**GitHub Pages** בחינם (הריפו צריך להיות **ציבורי**):
+1. ‏Settings ← Pages ← Source: **GitHub Actions**
+2. לשונית Actions ← **Deploy to GitHub Pages** ← Run workflow. מכאן והלאה כל עדכון ל-main עולה אוטומטית.
+3. הכתובת: `https://<שם-המשתמש>.github.io/Work_log/`
+
+ריפו ציבורי חושף רק את **הקוד**. המשמרות והשכר שלכם נשארים בטלפון בלבד.
 
 </div>

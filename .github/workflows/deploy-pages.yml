@@ -1,9 +1,10 @@
-# Manual deploy to GitHub Pages.
-# Private repos need a paid GitHub plan for Pages. Enable it in Settings -> Pages -> Source: GitHub Actions,
-# then run this workflow from the Actions tab. (Manual-only so it never fails on push when Pages is off.)
+# Deploys the app to GitHub Pages on every push to main (and on demand from the Actions tab).
+# One-time setup: Settings -> Pages -> Source: GitHub Actions. Pages is free for public repos.
 name: Deploy to GitHub Pages
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
