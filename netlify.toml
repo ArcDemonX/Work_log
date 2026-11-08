@@ -1,0 +1,10 @@
+# Netlify: no build step; publish the repo root.
+[build]
+  publish = "."
+  command = ""
+
+# Always fetch the newest service worker so updates reach phones quickly.
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
