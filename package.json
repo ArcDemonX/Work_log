@@ -1,0 +1,11 @@
+{
+  "name": "work-log",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Mobile-first shift tracker: clock in/out, hours & pay per month, Excel export, full backup/restore. Hebrew & English. Offline PWA, no dependencies.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "start": "python3 -m http.server 8080"
+  },
+  "engines": { "node": ">=18" }
+}
